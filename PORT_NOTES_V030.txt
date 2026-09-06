@@ -1,0 +1,7 @@
+Zenonia Lost Of Memories DSi v030
+- BGM path unchanged from v029.
+- Added persistent PCM cache for up to 12 SFX MMFs.
+- MTR SFX is decoded once, then replayed directly without costly re-render on each attack/menu action.
+- Added same-effect busy/cooldown guard (80..220 ms based on effect duration) to prevent duplicate echo from one logical action.
+- Repeated identical sound-hook requests no longer push the fallback deadline forward every frame.
+- Reduced SFX render log noise.
