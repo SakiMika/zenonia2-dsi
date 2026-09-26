@@ -149,7 +149,7 @@ int main(void) {
     wipi_init_video(&bottom);
     consoleSelect(&bottom);
     consoleClear();
-    printf("Zenonia Lost Of Memories - DSi port v030\n");
+    printf("Zenonia Lost Of Memories - DSi port v033\n");
     printf("TOP: fit split 0..159 -> 256x192\n");
     printf("BOTTOM: fit split 160..319 + touch quickslots\n");
     printf("LOG: touch LOG on lower LCD\n");
@@ -157,6 +157,7 @@ int main(void) {
     wipi_set_log_visible(false);
 
     if(!nitroFSInit(NULL)) { fatal_wait("NitroFS init failed"); return 1; }
+    wipi_init_storage();
 
     printf("[ROM] NitroFS payload: %lu bytes / %lu files\n",
            (unsigned long)embedded_asset_pack_size(),
@@ -241,7 +242,7 @@ int main(void) {
 
     printf("[RUN] startClet completed\n");
     wipi_debug_dump("after start");
-    printf("[RUN] Zenonia Lost Of Memories v030 smooth single-owner audio + speed\n");
+    printf("[RUN] Zenonia Lost Of Memories v033 single .sav + audio + speed\n");
     printf("[RUN] input/timers enabled\n");
     printf("[RUN] bottom screen = runtime log\n");
     printf("L+R+START = quit diagnostic build\n");
@@ -264,5 +265,6 @@ int main(void) {
         wipi_dispatch_keys(down,up);
         wipi_poll();
     }
+    wipi_flush_storage();
     return 0;
 }

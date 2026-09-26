@@ -3,6 +3,8 @@
 #include <stdint.h>
 
 void wipi_init_video(PrintConsole *log_console);
+void wipi_init_storage(void);
+void wipi_flush_storage(void);
 void wipi_poll(void);
 uint32_t wipi_get_import_table(uint32_t table);
 void *wipi_get_import_function(uint32_t table, uint32_t index);

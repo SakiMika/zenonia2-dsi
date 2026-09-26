@@ -1,5 +1,6 @@
 #include "wipi_shim.h"
 #include "embedded_assets.h"
+#include "zen_sav_backend.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,6 +8,8 @@
 #include <malloc.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <fat.h>
+#include <errno.h>
 
 namespace {
 constexpr int PHONE_W=240;
@@ -554,8 +557,66 @@ struct DbSlot {
     uint32_t write_cursor;
     bool used;
     bool packaged;
+    bool persistent;
+    bool dirty;
 };
 static DbSlot g_db[DB_SLOTS]{};
+
+static bool db_is_persistent_name(const char *name) {
+    return ZenSav::IsPersistentName(name);
+}
+
+static void storage_init_internal(void) {
+    // Do not touch Slot-1 EEPROM during the very early NitroFS/bootstrap phase.
+    // Only prepare the optional FAT fallback here. The native .sav probe is
+    // explicitly enabled immediately before the Clet start callback.
+    ZenSav::InitFatFallback();
+    printf("[SAV] early backend=%s\n",ZenSav::BackendName());
+}
+
+static int db_persistent_file_size(const char *name,uint32_t *out_len) {
+    if(out_len) *out_len=0;
+    if(!db_is_persistent_name(name)) return -12;
+    uint32_t len=0;
+    if(!ZenSav::Exists(name,&len)) return -12;
+    if(out_len) *out_len=len;
+    return 0;
+}
+
+static int db_load_persistent(DbSlot &d,const char *name) {
+    if(!db_is_persistent_name(name)) return -12;
+    uint8_t *mem=nullptr;
+    uint32_t len=0;
+    const int rc=ZenSav::Load(name,&mem,&len);
+    if(rc!=0) return rc;
+    free(d.data);
+    d.data=mem;
+    d.len=len;
+    d.capacity=len;
+    d.packaged=false;
+    d.persistent=true;
+    d.dirty=false;
+    d.read_cursor=0;
+    d.write_cursor=0;
+    printf("[SAV] DB load %s (%lu bytes)\n",d.name,(unsigned long)len);
+    return 0;
+}
+
+static int db_persist(DbSlot &d) {
+    if(!d.persistent || !d.dirty) return 0;
+    const int rc=ZenSav::Store(d.name,d.data,d.len);
+    if(rc!=0) return rc;
+    d.dirty=false;
+    printf("[SAV] DB commit %s (%lu bytes) via %s\n",d.name,(unsigned long)d.len,ZenSav::BackendName());
+    return 0;
+}
+
+static void storage_flush_internal(void) {
+    for(int i=0;i<DB_SLOTS;i++) {
+        if(g_db[i].used && g_db[i].persistent && g_db[i].dirty) db_persist(g_db[i]);
+    }
+    ZenSav::Flush();
+}
 
 // WIPI time is millisecond-resolution. v009 uses Calico's system tick counter:
 // it is 64-bit, monotonic, and intended for timed events in libnds 2.x.
@@ -1156,22 +1217,35 @@ extern "C" int db_open(const char *name,int mode,int type) {
     (void)type; g_trace.db_opens++; if(!name) return -9;
     audio_note_asset(name);
     // Each packaged database open must get an independent stream cursor.
-    // Keep RAM/save databases persistent for now, but never reuse an active
-    // packaged asset handle merely because its filename matches.
+    // Save DBs stay resident so repeated open/close cycles preserve the exact
+    // WIPI stream state and can be flushed to FAT.
     for(int i=0;i<DB_SLOTS;i++) if(g_db[i].used && !g_db[i].packaged && !strncmp(g_db[i].name,name,sizeof(g_db[i].name))) {
-        g_db[i].read_cursor=0; g_db[i].write_cursor=0;
-        printf("[DB] reopen-save %s len=%lu -> %d\n",g_db[i].name,(unsigned long)g_db[i].len,i+1);
+        DbSlot &d=g_db[i];
+        if(mode==4) {
+            d.len=0; d.read_cursor=0; d.write_cursor=0; d.packaged=false;
+            d.persistent=db_is_persistent_name(name); d.dirty=d.persistent;
+            // v033: defer physical .sav writes until DB close. Zenonia writes
+            // stream data in multiple chunks; committing each chunk to EEPROM
+            // causes excessive page-program cycles and long save stalls.
+        } else {
+            d.read_cursor=0; d.write_cursor=0;
+        }
+        printf("[DB] reopen-save %s len=%lu -> %d\n",d.name,(unsigned long)d.len,i+1);
         return i+1;
     }
     for(int i=0;i<DB_SLOTS;i++) if(!g_db[i].used) {
         DbSlot &d=g_db[i]; memset(&d,0,sizeof(d)); d.used=true;
         strncpy(d.name,name,sizeof(d.name)-1);
-        // Mode 4 is create/truncate in WIPI. For game assets, ordinary opens
-        // materialize the packaged NitroFS file into record 1.
+        // Mode 4 is create/truncate in WIPI. Ordinary opens first resolve
+        // immutable NitroFS assets, then Zenonia's writable save files.
         int load=(mode==4)?-12:db_load_packaged(d,name);
         if(load==0) {
             printf("[DB] packaged %s len=%lu -> %d\n",d.name,(unsigned long)d.len,i+1);
             return i+1;
+        }
+        if(mode!=4) {
+            load=db_load_persistent(d,name);
+            if(load==0) return i+1;
         }
         // WIPI mode 1 is open-existing. Missing save DB must report NOENT so
         // the game takes its fresh-save/create path instead of trying to load
@@ -1180,7 +1254,9 @@ extern "C" int db_open(const char *name,int mode,int type) {
             memset(&d,0,sizeof(d));
             return -12;
         }
-        printf("[DB] ram %s mode=%d -> %d\n",d.name,mode,i+1);
+        d.persistent=db_is_persistent_name(name);
+        d.dirty=(mode==4 && d.persistent);
+        printf("[DB] %s %s mode=%d -> %d\n",d.persistent?"save":"ram",d.name,mode,i+1);
         return i+1;
     }
     g_trace.db_open_fail++;
@@ -1213,6 +1289,7 @@ extern "C" int db_write(int id,const void *buf,uint32_t len) {
     }
     if(len) memcpy(d.data+d.write_cursor,buf,len);
     d.write_cursor=end; if(end>d.len)d.len=end; d.packaged=false;
+    if(d.persistent) d.dirty=true;
     return (int)len;
 }
 extern "C" int db_close(int id) {
@@ -1224,7 +1301,12 @@ extern "C" int db_close(int id) {
         free(d.data);
         memset(&d,0,sizeof(d));
     } else {
-        // RAM save backing remains alive across close in this diagnostic layer.
+        if(d.persistent && d.dirty) {
+            const int rc=db_persist(d);
+            if(rc!=0) printf("[SAV!] close commit %s rc=%d\n",d.name,rc);
+        }
+        // Save backing remains resident across close so WIPI reopen semantics
+        // remain unchanged while the bytes are durable in the single .sav.
         d.read_cursor=0; d.write_cursor=0;
     }
     return 0;
@@ -1259,10 +1341,12 @@ extern "C" int db_list_record_info(const char *name, uint32_t *out, uint32_t cap
     int idx=db_find_name(name);
     EmbeddedAssetView a{};
     bool packaged=embedded_asset_find(name,&a);
-    if(idx<0 && !packaged) {
+    uint32_t persisted_len=0;
+    bool persisted=(db_persistent_file_size(name,&persisted_len)==0);
+    if(idx<0 && !packaged && !persisted) {
         return -12;
     }
-    uint32_t len=(idx>=0)?g_db[idx].len:a.size;
+    uint32_t len=(idx>=0)?g_db[idx].len:(packaged?a.size:persisted_len);
     if(out && capacity>0) {
         // One record: {record id, flags/reserved, byte length}.
         out[0]=1;
@@ -1292,6 +1376,7 @@ extern "C" int db_update_record(int id,int rec_id,const void *buf,uint32_t len) 
     }
     if(len) memcpy(d.data,buf,len);
     d.len=len; d.read_cursor=0; d.write_cursor=len; d.packaged=false;
+    if(d.persistent) d.dirty=true;
     return 0;
 }
 
@@ -1309,6 +1394,7 @@ extern "C" int db_exists(const char *name,int) {
     if(!name) return -9;
     EmbeddedAssetView a{};
     bool exists=(db_find_name(name)>=0) || embedded_asset_find(name,&a);
+    if(!exists) { uint32_t ignored=0; exists=(db_persistent_file_size(name,&ignored)==0); }
     return exists?0:-12;
 }
 
@@ -1317,6 +1403,10 @@ extern "C" int db_delete(const char *name,int) {
     int idx=db_find_name(name);
     if(idx>=0) {
         free(g_db[idx].data); memset(&g_db[idx],0,sizeof(g_db[idx]));
+    }
+    if(db_is_persistent_name(name)) {
+        const int rc=ZenSav::Remove(name);
+        printf("[SAV] delete %s rc=%d\n",name,rc);
     }
     return 0;
 }
@@ -2363,6 +2453,17 @@ static void process_timers(void) {
 }
 }
 
+// Public storage entry points must have external linkage because main.cpp calls
+// them from a different translation unit.  The implementation itself stays in
+// the anonymous namespace so all DB/FAT state remains private to this file.
+void wipi_init_storage(void) {
+    storage_init_internal();
+}
+
+void wipi_flush_storage(void) {
+    storage_flush_internal();
+}
+
 void wipi_note_sound_request(int id,int arg2,int flag) {
     audio_note_sound_request_internal(id,arg2,flag);
 }
@@ -2953,6 +3054,11 @@ bool wipi_start_clet(void) {
     DC_FlushAll();
     printf("[CLET] invalidate I-cache\n");
     IC_InvalidateAll();
+    // v033: the ROM is fully initialized at this point, so native cartridge
+    // EEPROM probing is now allowed. This is intentionally later than NitroFS
+    // startup, following the supplied EasyRPG DSi save backend's policy.
+    ZenSav::EnableNativeProbe();
+    printf("[SAV] active backend=%s\n",ZenSav::BackendName());
     printf("[CLET>] calling cb0 now\n");
     // v005: call immediately; the previous VBlank wait was the actual hang.
     f();
