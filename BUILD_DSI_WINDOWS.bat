@@ -52,7 +52,7 @@ if "%DEVKITARM%"=="" set "DEVKITARM=%DEVKITPRO%\devkitARM"
 set "PATH=%DEVKITARM%\bin;%DEVKITPRO%\tools\bin;%PATH%"
 
 echo ================================================================
-echo Zenonia Lost Of Memories DSi v030 - adaptive BGM + speed
+echo Zenonia Lost Of Memories DSi v033 - single EEPROM128 .sav + adaptive BGM + speed
 echo ================================================================
 echo [TIME] %DATE% %TIME%
 echo [DIR]  %CD%
@@ -122,6 +122,6 @@ if not "%RC%"=="0" (
 )
 
 for %%F in ("Zenonia Lost Of Memories.nds") do echo [ROM] %%~fF  [%%~zF bytes]
-echo [OK] Zenonia Lost Of Memories.nds  [ID: ZLOM]
+echo [OK] Zenonia Lost Of Memories.nds  [ID: AAFA / EEPROM128 save profile]
 echo [SUCCESS] Build completed with no errors.
 exit /b 0

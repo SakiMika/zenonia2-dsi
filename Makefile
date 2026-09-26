@@ -73,7 +73,18 @@ clean:
 	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nds $(TARGET).map
 
 else
+# v033 native sidecar-save profile.  The game still identifies itself by the
+# Zenonia title/banner, but the NDS game code uses AAFA because current melonDS
+# maps that retail profile to a regular 128 KiB EEPROM (SaveMemType 4).
+# ARM9 is placed at 0x8000, matching the supplied EasyRPG DSi reference, so a
+# retail-looking header never makes the homebrew ARM9 payload look like a DS
+# secure-area block.  patch_nds_header.py then pads to the profile's exact
+# 8 MiB ROM size and fixes device-capacity/header CRC.
 $(OUTPUT).nds: $(OUTPUT).elf $(NITRO_FILES) $(GAME_ICON)
+	@echo "creating Zenonia v033: EEPROM128 sidecar profile, ARM9@0x8000..."
+	@ndstool -c $@ -9 $< $(_ARM7_ELF) -b $(GAME_ICON) "$(GAME_TITLE)" -h 0x8000 -g AAFA 01 "Zenonia" 33 $(_ADDFILES)
+	@python "$(dir $(OUTPUT))tools/patch_nds_header.py" "$@"
+
 $(OUTPUT).elf: $(OFILES)
 $(OFILES_SOURCES):
 
